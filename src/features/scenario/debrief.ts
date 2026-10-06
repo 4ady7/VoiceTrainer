@@ -32,6 +32,16 @@ export interface DebriefReport {
   steps: number
 }
 
+function credited(state: ScenarioState, componentId: ComponentId): boolean {
+  const contradicted = state.mistakes.some(
+    (mistake) => mistake.componentId === componentId && mistake.kind === 'incorrect_observation',
+  )
+  if (!contradicted) return isChecked(state, componentId)
+  return state.observations.some(
+    (record) => record.componentId === componentId && (record.judgment === 'correct' || record.judgment === 'partial'),
+  )
+}
+
 function latestClaimStatus(state: ScenarioState, componentId: ComponentId): KeyObservation['status'] {
   const claims = state.observations.filter((record) => record.componentId === componentId && record.claim)
   const latest = claims[claims.length - 1]
@@ -45,13 +55,15 @@ function latestClaimStatus(state: ScenarioState, componentId: ComponentId): KeyO
 export function buildDebrief(state: ScenarioState): DebriefReport {
   const didWell: string[] = []
   if (state.completed) didWell.push('You confirmed a restricted filter with the readings in hand.')
-  if (hasTruth(state, 'temperature_high')) {
+  if (credited(state, 'temperature_display') && hasTruth(state, 'temperature_high')) {
     didWell.push('You identified the warm outlet on the instrument, not only from the briefing.')
   }
-  if (hasTruth(state, 'pressure_high')) didWell.push('You brought the pressure gauge into the diagnosis.')
+  if (credited(state, 'pressure_gauge') && hasTruth(state, 'pressure_high')) {
+    didWell.push('You brought the pressure gauge into the diagnosis.')
+  }
   if (isChecked(state, 'power_switch')) didWell.push('You checked power instead of assuming the unit was dead.')
   if (isChecked(state, 'compressor')) didWell.push('You checked the compressor instead of assuming it had failed.')
-  if (isChecked(state, 'fan') && hasTruth(state, 'fan_spinning')) {
+  if (credited(state, 'fan') && hasTruth(state, 'fan_spinning')) {
     didWell.push('You noticed the fan was still spinning.')
   }
   if (state.completed && state.hintsUsed === 0) didWell.push('You finished without asking for a hint.')
@@ -104,8 +116,15 @@ export function buildDebrief(state: ScenarioState): DebriefReport {
   }
 
   const score = state.score
+  const evidence: string[] = []
+  if (hasTruth(state, 'temperature_high')) evidence.push('the warm outlet')
+  if (hasTruth(state, 'pressure_high')) evidence.push('the high gauge')
+  if (hasTruth(state, 'intake_weak') || hasTruth(state, 'outlet_weak')) evidence.push('the weak airflow')
+  if (hasTruth(state, 'filter_restricted')) evidence.push('the loaded filter')
   const outcome = state.completed
-    ? 'The restricted filter accounts for the warm outlet, the weak airflow, and the high gauge.'
+    ? evidence.length > 0
+      ? `The restricted filter accounts for ${evidence.join(', ')}.`
+      : 'The restricted filter accounts for the readings in this record.'
     : 'The fault was a restricted filter. It stays unconfirmed until the filter, the temperature, and one airflow or pressure check are all in the record.'
   const instructorFeedback = [
     `Overall diagnostic mark ${score.overall}. Diagnostic accuracy ${score.diagnosticAccuracy}. Observation accuracy ${score.observationAccuracy}. Process quality ${score.processQuality}.`,

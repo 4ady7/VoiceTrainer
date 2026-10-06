@@ -50,6 +50,10 @@ export function useVoiceControls({
   const blockedRef = useRef(blocked)
   const holdRef = useRef(false)
   const submitted = useRef(false)
+  const speakingRef = useRef(false)
+  const aliveRef = useRef(true)
+  const listenGen = useRef(0)
+  const pointerRelease = useRef<(() => void) | null>(null)
   const instructorRef = useRef(instructorLine)
   const onUtteranceRef = useRef(onUtterance)
   const onVoiceRef = useRef(onVoice)
@@ -70,13 +74,25 @@ export function useVoiceControls({
   }
 
   const startSession = (continuous: boolean) => {
+    if (!aliveRef.current) return
+    const generation = ++listenGen.current
     submitted.current = false
     recognition.current?.start(
       {
-        onStart: () => onVoiceRef.current('listening', continuous ? 'Listening' : 'Hold to talk'),
-        onInterim: (text) => setInterim(text),
-        onFinal: (text) => emit(text),
+        onStart: () => {
+          if (!aliveRef.current || generation !== listenGen.current) return
+          onVoiceRef.current('listening', continuous ? 'Listening' : 'Hold to talk')
+        },
+        onInterim: (text) => {
+          if (!aliveRef.current || generation !== listenGen.current) return
+          setInterim(text)
+        },
+        onFinal: (text) => {
+          if (!aliveRef.current || generation !== listenGen.current) return
+          emit(text)
+        },
         onError: (message) => {
+          if (!aliveRef.current || generation !== listenGen.current) return
           if (message === 'denied' || message === 'unsupported' || message === 'start-failed') {
             onError('Voice unavailable — continue with text.')
             onVoiceRef.current('error', 'Voice unavailable')
@@ -86,10 +102,12 @@ export function useVoiceControls({
           }
         },
         onEnd: () => {
-          if (holdRef.current) return
+          if (!aliveRef.current || generation !== listenGen.current) return
+          if (holdRef.current || speakingRef.current) return
           if (alwaysRef.current && !blockedRef.current) {
             window.setTimeout(() => {
-              if (alwaysRef.current && !blockedRef.current && !holdRef.current) startSession(true)
+              if (!aliveRef.current || generation !== listenGen.current) return
+              if (alwaysRef.current && !blockedRef.current && !holdRef.current && !speakingRef.current) startSession(true)
             }, 280)
           }
         },
@@ -99,8 +117,11 @@ export function useVoiceControls({
   }
 
   useEffect(() => {
+    aliveRef.current = true
     recognition.current = new SpeechRecognitionService()
     tts.current = new TextToSpeechService((speaking) => {
+      if (!aliveRef.current) return
+      speakingRef.current = speaking
       if (speaking) onVoiceRef.current('instructor_speaking', 'Instructor speaking')
       else if (!holdRef.current && !blockedRef.current) {
         onVoiceRef.current('ready', alwaysRef.current ? 'Listening' : 'Ready')
@@ -109,6 +130,15 @@ export function useVoiceControls({
     })
     setSupported(speechRecognitionSupported())
     return () => {
+      aliveRef.current = false
+      listenGen.current += 1
+      speakingRef.current = false
+      holdRef.current = false
+      if (pointerRelease.current) {
+        window.removeEventListener('pointerup', pointerRelease.current)
+        window.removeEventListener('pointercancel', pointerRelease.current)
+        pointerRelease.current = null
+      }
       recognition.current?.abort()
       tts.current?.stop()
     }
@@ -142,17 +172,26 @@ export function useVoiceControls({
   }, [preferVoice, onError])
 
   useEffect(() => {
-    if (!speechNonce || !instructorLine) return
+    if (!speechNonce || !instructorLine || !aliveRef.current) return
+    const willSpeak = !mutedRef.current && ttsSupported()
+    if (willSpeak) speakingRef.current = true
     recognition.current?.abort()
-    if (mutedRef.current || !ttsSupported()) {
+    if (!willSpeak) {
+      speakingRef.current = false
       onVoiceRef.current('ready', mutedRef.current ? 'Muted' : 'Ready')
+      if (alwaysRef.current && !blockedRef.current) startSession(true)
       return
     }
     tts.current?.speak(instructorLine)
   }, [speechNonce, instructorLine])
 
   useEffect(() => {
-    if (blocked) recognition.current?.abort()
+    if (!aliveRef.current) return
+    if (blocked) {
+      recognition.current?.abort()
+      return
+    }
+    if (alwaysRef.current && !holdRef.current && !speakingRef.current) startSession(true)
   }, [blocked])
 
   useEffect(() => {
@@ -179,8 +218,10 @@ export function useVoiceControls({
 
   function release() {
     holdRef.current = false
+    const generation = listenGen.current
     const pending = recognition.current?.stop() ?? ''
     window.setTimeout(() => {
+      if (!aliveRef.current || generation !== listenGen.current) return
       if (!submitted.current && pending) emit(pending)
       if (!submitted.current) onVoiceRef.current('ready', 'Ready')
     }, 420)
@@ -192,8 +233,18 @@ export function useVoiceControls({
     muted,
     supported,
     holdStart: () => {
-      if (!supported || blockedRef.current || alwaysRef.current) return
+      if (!supported || blockedRef.current || alwaysRef.current || holdRef.current) return
       holdRef.current = true
+      const end = () => {
+        window.removeEventListener('pointerup', end)
+        window.removeEventListener('pointercancel', end)
+        pointerRelease.current = null
+        if (!holdRef.current) return
+        release()
+      }
+      pointerRelease.current = end
+      window.addEventListener('pointerup', end)
+      window.addEventListener('pointercancel', end)
       startSession(false)
     },
     holdEnd: () => {

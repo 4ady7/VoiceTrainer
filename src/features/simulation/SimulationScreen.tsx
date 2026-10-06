@@ -10,6 +10,7 @@ import type { ComponentId, ScenarioState } from '../scenario/types'
 import { useVoiceControls } from '../voice/useVoiceControls'
 import { VoiceDock } from '../voice/VoiceDock'
 import { CoolingUnit } from './scene/CoolingUnit'
+import { SceneBoundary } from './SceneBoundary'
 
 interface SimulationScreenProps {
   scenario: ScenarioState
@@ -56,6 +57,7 @@ export function SimulationScreen({
   onError,
 }: SimulationScreenProps) {
   const [hover, setHover] = useState<ComponentId | null>(null)
+  const [sceneDown, setSceneDown] = useState(false)
   const reducedMotion = usePrefersReducedMotion()
   const visuals = useMemo(
     () => deriveVisuals(scenario, hover, scenario.lastComponentId),
@@ -85,12 +87,21 @@ export function SimulationScreen({
       <div className="sim-main">
         <EquipmentIndex visuals={visuals} disabled={voice === 'processing'} onInspect={(id) => void onInspect(id)} onHover={setHover} />
         <div className="stage">
-          <CoolingUnit
-            visuals={visuals}
-            reducedMotion={reducedMotion}
-            onHover={setHover}
-            onSelect={(id) => void onInspect(id)}
-          />
+          {sceneDown ? (
+            <p className="stage-fallback">
+              The 3D view is unavailable. The equipment list and the text box still run this exercise.
+            </p>
+          ) : (
+            <SceneBoundary>
+              <CoolingUnit
+                visuals={visuals}
+                reducedMotion={reducedMotion}
+                onHover={setHover}
+                onSelect={(id) => void onInspect(id)}
+                onUnavailable={() => setSceneDown(true)}
+              />
+            </SceneBoundary>
+          )}
           <p className="stage-caption">
             {hover ? componentLabel(hover) : 'Drag to look around the unit. Select a part, or talk through the check.'}
           </p>

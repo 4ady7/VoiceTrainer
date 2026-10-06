@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { COMPONENTS } from '../scenario/content'
 import { createInitialState, reduce } from '../scenario/engine'
-import { canonicalInspect, interpretDemo } from './demoInterpreter'
+import { canonicalInspect, interpretDemo, type InterpretContext } from './demoInterpreter'
 import { toEngineAction } from './mapToAction'
 import { replyAcceptable } from './guard'
 import { runTurn } from './orchestrate'
@@ -70,6 +70,46 @@ describe('demo interpreter', () => {
     expect(toEngineAction(interpretDemo('ok', { lastComponentId: null }), { lastComponentId: null })).toEqual({
       type: 'acknowledge',
     })
+  })
+
+  it('labels a hint as a hint and does not record it as a mistake', async () => {
+    const state = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const outcome = await runTurn(
+      { utterance: 'Can I get a hint?', state, recent: [], mode: 'local', now: 1000 },
+      { interpret: async () => null, phrase: async () => null },
+    )
+    expect(outcome.transition).toBe('Hint')
+    expect(outcome.state.hintsUsed).toBe(1)
+    expect(outcome.state.mistakes).toHaveLength(0)
+  })
+
+  it('maps other ways of saying the same pressure check or reading', () => {
+    const ctx: InterpretContext = { lastComponentId: null }
+    const inspect: EngineAction = { type: 'inspect', componentId: 'pressure_gauge' }
+    const reading: EngineAction = { type: 'observe', componentId: 'pressure_gauge', claim: 'pressure_high' }
+    const phrases: Array<[string, EngineAction]> = [
+      ["I'll check the pressure gauge.", inspect],
+      ["I'm checking the pressure.", inspect],
+      ['Let me look at the pressure reading.', inspect],
+      ["I'm going to inspect the gauge.", inspect],
+      ['Pressure gauge first.', inspect],
+      ['Check pressure.', inspect],
+      ['That gauge is reading high.', reading],
+      ['I notice the pressure is above normal.', reading],
+    ]
+    for (const [phrase, expected] of phrases) {
+      expect(toEngineAction(interpretDemo(phrase, ctx), ctx)).toEqual(expected)
+    }
+  })
+
+  it('asks for clarification when the remark names two parts, two faults, or no part', () => {
+    const ctx = { lastComponentId: null }
+    expect(toEngineAction(interpretDemo('Check the fan and the filter.', ctx), ctx)).toEqual({ type: 'clarify' })
+    expect(toEngineAction(interpretDemo('The temperature is normal but the pressure is high.', ctx), ctx)).toEqual({
+      type: 'clarify',
+    })
+    expect(toEngineAction(interpretDemo('Could it be the fan or the compressor?', ctx), ctx)).toEqual({ type: 'clarify' })
+    expect(toEngineAction(interpretDemo("something's wrong", ctx), ctx)).toEqual({ type: 'clarify' })
   })
 
   it('plays a full diagnostic conversation through the engine', () => {
@@ -161,5 +201,107 @@ describe('orchestrator', () => {
     const seen = reduce(state, { type: 'inspect', componentId: 'pressure_gauge' }, 1000).state
     expect(JSON.stringify(snapshotState(seen))).toContain('above the marked band')
     expect(JSON.stringify(snapshotState(seen))).not.toContain('filter_restricted')
+  })
+
+  it('keeps a model failure on the local interpreter and still records the check', async () => {
+    const state = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const outcome = await runTurn(
+      { utterance: "I'm checking the pressure gauge.", state, recent: [], mode: 'live', now: 1000 },
+      {
+        interpret: async () => {
+          throw new Error('offline')
+        },
+        phrase: async () => null,
+      },
+    )
+    expect(outcome.usedModel).toBe(false)
+    expect(outcome.state.checked.pressure_gauge).toBeTruthy()
+    expect(outcome.state.completed).toBe(false)
+  })
+
+  it('keeps the engine reply when phrasing fails', async () => {
+    const state = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const outcome = await runTurn(
+      { utterance: "I'm checking the fan.", state, recent: [], mode: 'live', now: 1000 },
+      {
+        interpret: async () => ({
+          intent: 'inspect',
+          mentionedComponents: ['fan'],
+          claimedObservations: [],
+          diagnosticHypothesis: null,
+          requestedHint: false,
+          needsClarification: false,
+        }),
+        phrase: async () => {
+          throw new Error('timeout')
+        },
+      },
+    )
+    expect(outcome.phrased).toBe(false)
+    expect(outcome.state.checked.fan).toBeTruthy()
+    expect(outcome.reply.length).toBeGreaterThan(0)
+    expect(outcome.state.completed).toBe(false)
+  })
+
+  it('does not let a model mark the scenario complete or score it', async () => {
+    const state = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const invented = await runTurn(
+      { utterance: 'ok', state, recent: [], mode: 'live', now: 1000 },
+      {
+        interpret: async () => ({
+          intent: 'acknowledge',
+          mentionedComponents: [],
+          claimedObservations: [],
+          diagnosticHypothesis: null,
+          requestedHint: false,
+          needsClarification: false,
+          completed: true,
+          score: 100,
+        }),
+        phrase: async () => 'Diagnosis confirmed. Final score 100.',
+      },
+    )
+    expect(invented.state.completed).toBe(false)
+    expect(invented.state.score).toEqual(state.score)
+    expect(invented.reply.toLowerCase()).not.toContain('score')
+
+    const early = await runTurn(
+      { utterance: 'My diagnosis is a restricted filter.', state, recent: [], mode: 'live', now: 1000 },
+      {
+        interpret: async () => ({
+          intent: 'confirm',
+          mentionedComponents: [],
+          claimedObservations: [],
+          diagnosticHypothesis: 'restricted_filter',
+          requestedHint: false,
+          needsClarification: false,
+        }),
+        phrase: async () => null,
+      },
+    )
+    expect(early.state.completed).toBe(false)
+    expect(early.state.prematureConfirms).toBe(1)
+    expect(early.state.confirmedDiagnosis).toBeNull()
+  })
+
+  it('does not check either part when the model names two without a distinguishing claim', async () => {
+    const state = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const outcome = await runTurn(
+      { utterance: 'Check the fan and the filter.', state, recent: [], mode: 'live', now: 1000 },
+      {
+        interpret: async () => ({
+          intent: 'inspect',
+          mentionedComponents: ['fan', 'filter_panel'],
+          claimedObservations: [],
+          diagnosticHypothesis: null,
+          requestedHint: false,
+          needsClarification: false,
+        }),
+        phrase: async () => null,
+      },
+    )
+    expect(outcome.state.checked).toEqual({})
+    expect(outcome.state.uncertaintyTurns).toBe(1)
+    expect(outcome.state.mistakes).toEqual([])
   })
 })

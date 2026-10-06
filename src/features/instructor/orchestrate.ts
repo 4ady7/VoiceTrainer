@@ -62,10 +62,15 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnOut
   let usedModel = false
   let parsed = null as ReturnType<typeof interpretationSchema.safeParse> | null
   if (input.mode === 'live') {
-    const raw = await deps.interpret(input, snapshotState(input.state))
-    if (raw) {
-      parsed = interpretationSchema.safeParse(raw)
-      usedModel = parsed.success
+    try {
+      const raw = await deps.interpret(input, snapshotState(input.state))
+      if (raw) {
+        parsed = interpretationSchema.safeParse(raw)
+        usedModel = parsed.success
+      }
+    } catch {
+      parsed = null
+      usedModel = false
     }
   }
 
@@ -77,15 +82,19 @@ export async function runTurn(input: TurnInput, deps: TurnDeps): Promise<TurnOut
   let phrased = false
 
   if (usedModel && action.type !== 'clarify' && action.type !== 'acknowledge') {
-    const spoken = await deps.phrase({
-      utterance,
-      template,
-      result,
-      snapshot: snapshotState(result.state),
-    })
-    if (spoken && replyAcceptable(spoken, result)) {
-      reply = spoken.trim()
-      phrased = true
+    try {
+      const spoken = await deps.phrase({
+        utterance,
+        template,
+        result,
+        snapshot: snapshotState(result.state),
+      })
+      if (spoken && replyAcceptable(spoken, result)) {
+        reply = spoken.trim()
+        phrased = true
+      }
+    } catch {
+      reply = template
     }
   }
 

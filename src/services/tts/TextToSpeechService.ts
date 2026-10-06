@@ -6,6 +6,7 @@ export class TextToSpeechService {
   private last = ''
   private generation = 0
   private timer = 0
+  private watch = 0
 
   constructor(private onSpeaking: (speaking: boolean) => void) {}
 
@@ -21,6 +22,7 @@ export class TextToSpeechService {
     this.last = text
     const generation = ++this.generation
     window.clearTimeout(this.timer)
+    window.clearTimeout(this.watch)
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.rate = 0.98
@@ -34,11 +36,21 @@ export class TextToSpeechService {
       if (generation === this.generation) this.onSpeaking(true)
     }
     utterance.onend = () => {
-      if (generation === this.generation) this.onSpeaking(false)
+      if (generation !== this.generation) return
+      window.clearTimeout(this.watch)
+      this.onSpeaking(false)
     }
     utterance.onerror = () => {
-      if (generation === this.generation) this.onSpeaking(false)
+      if (generation !== this.generation) return
+      window.clearTimeout(this.watch)
+      this.onSpeaking(false)
     }
+    this.watch = window.setTimeout(() => {
+      if (generation !== this.generation) return
+      this.generation += 1
+      if (ttsSupported()) window.speechSynthesis.cancel()
+      this.onSpeaking(false)
+    }, Math.min(60000, 2500 + text.length * 70))
     this.timer = window.setTimeout(() => {
       if (generation !== this.generation) return
       window.speechSynthesis.speak(utterance)
@@ -48,6 +60,7 @@ export class TextToSpeechService {
   stop(): void {
     this.generation += 1
     window.clearTimeout(this.timer)
+    window.clearTimeout(this.watch)
     if (ttsSupported()) window.speechSynthesis.cancel()
     this.onSpeaking(false)
   }

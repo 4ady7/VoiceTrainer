@@ -51,25 +51,45 @@ export function normalizeUtterance(input: string): string {
     .trim()
 }
 
-function findComponent(text: string): ComponentId | null {
+function findComponents(text: string): ComponentId[] {
+  const found: { id: ComponentId; index: number }[] = []
   for (const matcher of COMPONENT_MATCHERS) {
-    if (matcher.pattern.test(text)) return matcher.id
+    const index = text.search(matcher.pattern)
+    if (index >= 0) found.push({ id: matcher.id, index })
   }
-  return null
+  found.sort((left, right) => left.index - right.index)
+  const unique: ComponentId[] = []
+  for (const item of found) {
+    if (!unique.includes(item.id)) unique.push(item.id)
+  }
+  return unique
+}
+
+function findComponent(text: string): ComponentId | null {
+  const found = findComponents(text)
+  return found.length === 1 ? found[0] : null
+}
+
+function matchingDiagnoses(text: string, loose: boolean): DiagnosisId[] {
+  const strict = DIAGNOSIS_MATCHERS.filter((matcher) => matcher.pattern.test(text)).map((matcher) => matcher.id)
+  if (strict.length > 0 || !loose) return strict
+  const found: DiagnosisId[] = []
+  if (/filter/.test(text)) found.push('restricted_filter')
+  if (/compressor/.test(text)) found.push('compressor_failure')
+  if (/\bfan\b/.test(text)) found.push('fan_failure')
+  if (/emergency stop|e-stop|estop/.test(text)) found.push('emergency_stop_engaged')
+  if (/charge|refrigerant/.test(text)) found.push('low_charge')
+  if (/\bpower\b/.test(text) && !/power switch|power button/.test(text)) found.push('power_loss')
+  return found
 }
 
 function findDiagnosis(text: string, loose: boolean): DiagnosisId | null {
-  for (const matcher of DIAGNOSIS_MATCHERS) {
-    if (matcher.pattern.test(text)) return matcher.id
-  }
-  if (!loose) return null
-  if (/filter/.test(text)) return 'restricted_filter'
-  if (/compressor/.test(text)) return 'compressor_failure'
-  if (/\bfan\b/.test(text)) return 'fan_failure'
-  if (/emergency stop|e-stop|estop/.test(text)) return 'emergency_stop_engaged'
-  if (/charge|refrigerant/.test(text)) return 'low_charge'
-  if (/power/.test(text)) return 'power_loss'
-  return null
+  const found = matchingDiagnoses(text, loose)
+  return found.length === 1 ? found[0] : null
+}
+
+function ambiguousFault(text: string): boolean {
+  return matchingDiagnoses(text, true).length > 1
 }
 
 type ClaimShape =
@@ -96,10 +116,14 @@ function detectShape(text: string): ClaimShape | null {
   if (/(intake|outlet|airflow|air flow)/.test(text) && /(weak|low|poor|barely|reduced|restricted)/.test(text)) {
     return 'weak_air'
   }
-  if (/higher than expected|too high|reading high|reads high|\bhigh\b|above the|elevated|warmer than expected|hotter than/.test(text)) {
+  if (
+    /higher than expected|too high|reading high|reads high|\bhigh\b|above the|above normal|above expected|elevated|warmer than expected|hotter than/.test(
+      text,
+    )
+  ) {
     return 'high'
   }
-  if (/too low|reading low|reads low|\blow\b|below the|lower than expected/.test(text)) return 'low'
+  if (/too low|reading low|reads low|\blow\b|below the|below normal|lower than expected/.test(text)) return 'low'
   if (/warm|hot/.test(text)) return 'warm'
   if (/not spinning|isn't spinning|not running|isn't running|is stopped|has stopped|not moving|isn't moving/.test(text)) {
     return 'stopped'
@@ -197,18 +221,20 @@ export function interpretDemo(utterance: string, ctx: InterpretContext): Interpr
   if (!text || UNCLEAR.test(text)) return emptyInterpretation('clarify')
   if (ACK.test(text)) return emptyInterpretation('acknowledge')
 
+  const mentioned = findComponents(text)
   const hypothesisCue = HYPOTHESIS.test(text)
   const confirmCue = CONFIRM.test(text)
-  if (hypothesisCue) {
-    const diagnosis = findDiagnosis(text, true)
-    if (diagnosis) return hypothesis(diagnosis)
+  if ((hypothesisCue || confirmCue || FAILURE.test(text)) && ambiguousFault(text)) {
+    return emptyInterpretation('clarify')
   }
-  if (confirmCue) {
+  if (hypothesisCue || confirmCue) {
     const diagnosis = findDiagnosis(text, true)
-    if (diagnosis) return confirmation(diagnosis)
+    if (diagnosis && hypothesisCue) return hypothesis(diagnosis)
+    if (diagnosis && confirmCue) return confirmation(diagnosis)
   }
 
   const shape = detectShape(text)
+  if (mentioned.length > 1 && shape) return emptyInterpretation('clarify')
   if (shape) {
     const componentId = componentForShape(shape, text, ctx)
     const claim = resolveClaim(shape, componentId, text)
@@ -219,7 +245,7 @@ export function interpretDemo(utterance: string, ctx: InterpretContext): Interpr
         claimedObservations: [claim],
       }
     }
-    if (shape === 'high' || shape === 'low' || shape === 'weak_air') return emptyInterpretation('clarify')
+    return emptyInterpretation('clarify')
   }
 
   if (FAILURE.test(text)) {
@@ -229,7 +255,8 @@ export function interpretDemo(utterance: string, ctx: InterpretContext): Interpr
 
   if (HINT.test(text)) return emptyInterpretation('hint')
 
-  const componentId = findComponent(text)
+  if (mentioned.length > 1) return emptyInterpretation('clarify')
+  const componentId = mentioned[0]
   if (componentId) {
     return { ...emptyInterpretation('inspect'), mentionedComponents: [componentId] }
   }

@@ -9,6 +9,7 @@ import { runTurn } from '../features/instructor/orchestrate'
 import { snapshotState } from '../features/instructor/snapshot'
 import { fetchCoaching, fetchHealth, fetchInterpretation, fetchPhrase } from '../services/ai/client'
 import { OBSERVATION_TEXT } from '../features/scenario/content'
+import { canCommitTurn } from './sessionGuard'
 
 export type ScreenName = 'start' | 'briefing' | 'simulation' | 'debrief'
 export type InterpreterMode = 'unknown' | 'live' | 'local'
@@ -59,21 +60,22 @@ function initialSession(interpreter: InterpreterMode = 'unknown'): SessionState 
 export function useTrainingSession() {
   const [session, setSession] = useState<SessionState>(() => initialSession())
   const inflight = useRef(false)
+  const epochRef = useRef(0)
   const scenarioRef = useRef(session.scenario)
   const transcriptRef = useRef(session.transcript)
   const interpreterRef = useRef(session.interpreter)
+  const screenRef = useRef(session.screen)
   scenarioRef.current = session.scenario
   transcriptRef.current = session.transcript
   interpreterRef.current = session.interpreter
+  screenRef.current = session.screen
 
   useEffect(() => {
     let cancelled = false
     void fetchHealth().then((live) => {
-      if (!cancelled) {
-        const interpreter = live ? 'live' : 'local'
-        interpreterRef.current = interpreter
-        setSession((current) => ({ ...current, interpreter }))
-      }
+      if (cancelled) return
+      const interpreter = live ? 'live' : 'local'
+      setSession((current) => (current.interpreter === 'unknown' ? { ...current, interpreter } : current))
     })
     return () => {
       cancelled = true
@@ -96,6 +98,8 @@ export function useTrainingSession() {
   }, [])
 
   const enter = useCallback(() => {
+    epochRef.current += 1
+    inflight.current = false
     const before = createInitialState()
     const result = reduce(before, { type: 'begin' }, Date.now())
     const line = composeReply(before, { type: 'begin' }, result)
@@ -125,26 +129,34 @@ export function useTrainingSession() {
 
   const submit = useCallback(async (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || inflight.current) return false
+    if (!trimmed || inflight.current || screenRef.current !== 'simulation') return false
+    const epoch = epochRef.current
+    const snapshot = scenarioRef.current
+    const recent = transcriptRef.current.slice(-8).map((turn) => ({ speaker: turn.speaker, text: turn.text }))
+    const mode = interpreterRef.current === 'live' ? 'live' : 'local'
     inflight.current = true
-    setSession((current) => ({ ...current, voice: 'processing', voiceDetail: 'Processing', error: null }))
+    setSession((current) =>
+      canCommitTurn(epoch, epochRef.current, current.screen)
+        ? { ...current, voice: 'processing', voiceDetail: 'Processing', error: null }
+        : current,
+    )
     const started = performance.now()
     try {
       const outcome = await runTurn(
         {
           utterance: trimmed,
-          state: scenarioRef.current,
-          recent: transcriptRef.current.slice(-8).map((turn) => ({ speaker: turn.speaker, text: turn.text })),
-          mode: interpreterRef.current === 'live' ? 'live' : 'local',
+          state: snapshot,
+          recent,
+          mode,
           now: Date.now(),
         },
         {
-          interpret: async (turn, snapshot) => {
-            if (interpreterRef.current !== 'live') return null
-            return fetchInterpretation({ utterance: turn.utterance, snapshot, recent: turn.recent })
+          interpret: async (turn, turnSnapshot) => {
+            if (mode !== 'live') return null
+            return fetchInterpretation({ utterance: turn.utterance, snapshot: turnSnapshot, recent: turn.recent })
           },
           phrase: async ({ utterance, template, result }) => {
-            if (interpreterRef.current !== 'live') return null
+            if (mode !== 'live') return null
             return fetchPhrase({
               utterance,
               template,
@@ -162,16 +174,18 @@ export function useTrainingSession() {
           },
         },
       )
-      if (interpreterRef.current === 'live' && !outcome.usedModel) interpreterRef.current = 'local'
+      if (!canCommitTurn(epoch, epochRef.current, screenRef.current)) return false
+      const nextInterpreter: InterpreterMode | null = mode === 'live' && !outcome.usedModel ? 'local' : null
       const latency = Math.round(performance.now() - started)
       setSession((current) => {
+        if (!canCommitTurn(epoch, epochRef.current, current.screen)) return current
         const nonce = current.speechNonce + 1
         const you: TranscriptTurn = {
           id: `you-${nonce}`,
           speaker: 'you',
           text: trimmed,
-          atMs: current.scenario.elapsedMs,
-          phase: current.scenario.phase,
+          atMs: snapshot.elapsedMs,
+          phase: snapshot.phase,
           componentId: outcome.componentId,
           transition: outcome.transition,
         }
@@ -193,44 +207,58 @@ export function useTrainingSession() {
           latencies: [...current.latencies, latency],
           voice: 'instructor_speaking',
           voiceDetail: 'Instructor speaking',
-          interpreter: interpreterRef.current,
+          interpreter: nextInterpreter ?? current.interpreter,
         }
       })
       return true
     } catch {
-      setSession((current) => ({
-        ...current,
-        error: 'That turn did not go through. The session is still open — try again.',
-        voice: 'ready',
-        voiceDetail: 'Ready',
-      }))
+      if (!canCommitTurn(epoch, epochRef.current, screenRef.current)) return false
+      setSession((current) => {
+        if (!canCommitTurn(epoch, epochRef.current, current.screen)) return current
+        return {
+          ...current,
+          error: 'That turn did not go through. The session is still open — try again.',
+          voice: 'ready',
+          voiceDetail: 'Ready',
+        }
+      })
       return false
     } finally {
-      inflight.current = false
+      if (epoch === epochRef.current) inflight.current = false
     }
   }, [])
 
   const inspect = useCallback(async (componentId: ComponentId) => submit(canonicalInspect(componentId)), [submit])
 
   const openDebrief = useCallback(() => {
+    const epoch = (epochRef.current += 1)
+    inflight.current = false
     const scenario = reduce(scenarioRef.current, { type: 'tick' }, Date.now()).state
     scenarioRef.current = scenario
     setSession((current) => ({ ...current, scenario, screen: 'debrief', voice: 'ready', voiceDetail: 'Ready' }))
     if (interpreterRef.current !== 'live') return
     const report = buildDebrief(scenario)
     void fetchCoaching(report).then((text) => {
+      if (epoch !== epochRef.current) return
       if (!text || !coachingAcceptable(text, report)) return
-      setSession((current) => ({ ...current, coaching: text }))
+      setSession((current) =>
+        current.screen === 'debrief' && epoch === epochRef.current ? { ...current, coaching: text } : current,
+      )
     })
   }, [])
 
   const restart = useCallback(() => {
+    epochRef.current += 1
     inflight.current = false
     setSession((current) => initialSession(current.interpreter))
   }, [])
 
   const setVoice = useCallback((voice: VoiceUiState, detail?: string) => {
-    setSession((current) => ({ ...current, voice, voiceDetail: detail ?? current.voiceDetail }))
+    setSession((current) => {
+      if (current.screen !== 'simulation') return current
+      if (current.voice === 'processing' && voice !== 'error') return current
+      return { ...current, voice, voiceDetail: detail ?? current.voiceDetail }
+    })
   }, [])
 
   const setError = useCallback((error: string | null) => {

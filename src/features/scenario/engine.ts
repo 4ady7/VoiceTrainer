@@ -63,6 +63,14 @@ function finalize(state: ScenarioState, now: number): ScenarioState {
   }
 }
 
+function knownComponent(id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(COMPONENT_BY_ID, id)
+}
+
+function knownDiagnosis(id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(DIAGNOSIS_LABEL, id)
+}
+
 function result(
   state: ScenarioState,
   now: number,
@@ -121,11 +129,29 @@ function selectHint(state: ScenarioState): HintId {
   return 'name_fault'
 }
 
-function finished(state: ScenarioState): boolean {
-  return state.completed
+function frozen(
+  state: ScenarioState,
+  extras: Partial<Omit<ReduceResult, 'state'>> = {},
+): ReduceResult {
+  return {
+    state,
+    judgment: extras.judgment ?? null,
+    componentId: extras.componentId ?? null,
+    claim: extras.claim ?? null,
+    truth: extras.truth ?? null,
+    hintId: extras.hintId ?? null,
+    premature: extras.premature ?? false,
+    completedNow: extras.completedNow ?? false,
+    wrongDiagnosis: extras.wrongDiagnosis ?? null,
+  }
 }
 
 export function reduce(state: ScenarioState, action: EngineAction, now = 0): ReduceResult {
+  if (state.completed) {
+    const judgment = action.type === 'tick' || action.type === 'begin' ? null : 'already_checked'
+    return frozen(state, { judgment })
+  }
+
   if (action.type === 'begin') {
     if (state.startedAtMs != null) return result(state, now)
     const next: ScenarioState = {
@@ -140,7 +166,12 @@ export function reduce(state: ScenarioState, action: EngineAction, now = 0): Red
 
   if (action.type === 'tick') return result(state, now)
 
-  if (finished(state)) return result(state, now, { judgment: 'already_checked' })
+  if ((action.type === 'inspect' || action.type === 'observe') && !knownComponent(action.componentId)) {
+    return result(state, now)
+  }
+  if ((action.type === 'hypothesize' || action.type === 'confirm') && !knownDiagnosis(action.diagnosisId)) {
+    return result(state, now)
+  }
 
   const atMs = elapsed(state, now)
 

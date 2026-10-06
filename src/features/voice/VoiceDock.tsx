@@ -41,10 +41,15 @@ export function VoiceDock({
           aria-pressed={alwaysOn}
           onPointerDown={(event) => {
             event.preventDefault()
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId)
+            } catch {
+              // Releasing outside the button still ends the hold.
+            }
             onHoldStart()
           }}
           onPointerUp={onHoldEnd}
-          onPointerLeave={onHoldEnd}
+          onPointerCancel={onHoldEnd}
           onKeyDown={(event) => {
             if (event.repeat) return
             if (event.code === 'Space' || event.key === 'Enter') {

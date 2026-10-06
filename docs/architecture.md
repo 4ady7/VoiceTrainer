@@ -52,6 +52,8 @@ Judgments are `correct`, `partial`, `incorrect`, `irrelevant`, and `already_chec
 
 Empty audio and unclear remarks do not become mistakes. Clarification increments uncertainty, which can raise guidance, and does not change the score by itself. An empty submit does not enter the engine at all.
 
+Once a run is completed, later ticks and actions leave its score, guidance, elapsed time, and diagnostic record unchanged. Reset builds a new state. A turn still in flight when the session ends or resets is discarded, so it cannot write into the next run.
+
 Guidance is `normal`, `supportive`, or `high_support`, derived from mistakes, hints, stalls, uncertainty, wrong confirmations, elapsed time, and whether the filter has been seen.
 
 ## Voice loop

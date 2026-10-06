@@ -11,6 +11,7 @@ interface CoolingUnitProps {
   reducedMotion: boolean
   onHover: (id: ComponentId | null) => void
   onSelect: (id: ComponentId) => void
+  onUnavailable?: () => void
 }
 
 function plateTexture(text: string, accent: string): THREE.CanvasTexture {
@@ -142,7 +143,13 @@ function instrumentText(id: ComponentId, visual: ComponentVisual): string {
   return visual.checked || visual.warning || visual.fault ? face.after : face.before
 }
 
-export const CoolingUnit = memo(function CoolingUnit({ visuals, reducedMotion, onHover, onSelect }: CoolingUnitProps) {
+export const CoolingUnit = memo(function CoolingUnit({
+  visuals,
+  reducedMotion,
+  onHover,
+  onSelect,
+  onUnavailable,
+}: CoolingUnitProps) {
   const nameplate = useMemo(() => plateTexture('HYDRACOOL', '#8d734c'), [])
   useEffect(() => () => nameplate.dispose(), [nameplate])
 
@@ -156,6 +163,11 @@ export const CoolingUnit = memo(function CoolingUnit({ visuals, reducedMotion, o
         gl.toneMapping = THREE.ACESFilmicToneMapping
         gl.toneMappingExposure = 1.05
         gl.setClearColor('#0e1114')
+        const onLost = (event: Event) => {
+          event.preventDefault()
+          onUnavailable?.()
+        }
+        gl.domElement.addEventListener('webglcontextlost', onLost)
       }}
     >
       <fog attach="fog" args={['#0e1114', 7, 14]} />

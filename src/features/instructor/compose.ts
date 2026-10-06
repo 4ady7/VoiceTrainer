@@ -110,6 +110,7 @@ export function transitionLabel(result: ReduceResult): string | null {
   if (result.judgment === 'correct' && name) return `${name} accepted`
   if (result.judgment === 'already_checked') return name ? `${name} already checked` : 'Already covered'
   if (result.judgment === 'incorrect') return 'Does not match the equipment'
+  if (result.hintId) return 'Hint'
   if (result.judgment === 'partial') return name ? `${name} partially read` : 'Partial observation'
   if (result.judgment === 'irrelevant') return 'Outside the scenario'
   return null

@@ -3,7 +3,7 @@ import { COMPONENTS } from './content'
 import { buildDebrief } from './debrief'
 import { createInitialState, reduce } from './engine'
 import { deriveGuidance } from './guidance'
-import type { EngineAction, ScenarioState } from './types'
+import type { ComponentId, DiagnosisId, EngineAction, ScenarioState } from './types'
 import { deriveVisuals } from './visuals'
 
 function run(actions: EngineAction[], start = 0, step = 1000): ScenarioState {
@@ -217,5 +217,81 @@ describe('scenario engine', () => {
     expect(report.path.length).toBe(state.diagnosticPath.length)
     expect(report.confirmedLabel).toBe('Restricted filter')
     expect(COMPONENTS.length).toBe(11)
+  })
+
+  it('freezes the score and the diagnostic record once the scenario is complete', () => {
+    const done = run([
+      { type: 'inspect', componentId: 'temperature_display' },
+      { type: 'inspect', componentId: 'pressure_gauge' },
+      { type: 'inspect', componentId: 'fan' },
+      { type: 'inspect', componentId: 'filter_panel' },
+      { type: 'confirm', diagnosisId: 'restricted_filter' },
+    ])
+    const later = reduce(done, { type: 'tick' }, 20 * 60 * 1000)
+    expect(later.state).toBe(done)
+    expect(buildDebrief(later.state).overall).toBe(done.score.overall)
+    const after = reduce(done, { type: 'inspect', componentId: 'compressor' }, 30 * 60 * 1000)
+    expect(after.judgment).toBe('already_checked')
+    expect(after.state).toBe(done)
+    expect(after.state.checked.compressor).toBeUndefined()
+    const repeated = reduce(done, { type: 'confirm', diagnosisId: 'fan_failure' }, 30 * 60 * 1000)
+    expect(repeated.state.confirmedDiagnosis).toBe('restricted_filter')
+    expect(repeated.state.wrongConfirms).toBe(done.wrongConfirms)
+    expect(repeated.state.completed).toBe(true)
+  })
+
+  it('ignores component and diagnosis ids that are not in the scenario', () => {
+    const begun = reduce(createInitialState(), { type: 'begin' }, 0).state
+    const missingPart = reduce(begun, { type: 'inspect', componentId: 'not_a_part' as ComponentId }, 1000)
+    const missingClaim = reduce(
+      begun,
+      { type: 'observe', componentId: 'not_a_part' as ComponentId, claim: 'pressure_high' },
+      1000,
+    )
+    const missingFault = reduce(begun, { type: 'confirm', diagnosisId: 'not_a_fault' as DiagnosisId }, 1000)
+    expect(missingPart.judgment).toBeNull()
+    expect(missingPart.state.checked).toEqual({})
+    expect(missingPart.state.actionCount).toBe(begun.actionCount)
+    expect(missingClaim.state.observations).toEqual([])
+    expect(missingFault.state.completed).toBe(false)
+    expect(missingFault.state.wrongConfirms).toBe(0)
+    expect(missingFault.state.mistakes).toEqual([])
+  })
+
+  it('starts a later session from a clean state', () => {
+    const done = run([
+      { type: 'inspect', componentId: 'fan' },
+      { type: 'request_hint' },
+      { type: 'confirm', diagnosisId: 'restricted_filter' },
+    ])
+    const fresh = createInitialState()
+    expect(done.checked.fan).toBeTruthy()
+    expect(fresh.completed).toBe(false)
+    expect(fresh.hintsUsed).toBe(0)
+    expect(fresh.checked).toEqual({})
+    expect(fresh.score.overall).toBe(0)
+    expect(fresh.mistakes).toEqual([])
+  })
+
+  it('does not praise a reading the trainee got wrong', () => {
+    const misread = run([{ type: 'observe', componentId: 'fan', claim: 'fan_stopped' }])
+    const looked = run([{ type: 'inspect', componentId: 'fan' }])
+    expect(buildDebrief(misread).didWell.join(' ')).not.toContain('fan was still spinning')
+    expect(buildDebrief(misread).missed.some((item) => item.toLowerCase().includes('fan'))).toBe(true)
+    expect(buildDebrief(looked).didWell.join(' ')).toContain('fan was still spinning')
+  })
+
+  it('mentions only the readings that were actually gathered', () => {
+    const state = run([
+      { type: 'inspect', componentId: 'filter_panel' },
+      { type: 'inspect', componentId: 'air_outlet' },
+      { type: 'inspect', componentId: 'temperature_display' },
+      { type: 'confirm', diagnosisId: 'restricted_filter' },
+    ])
+    const report = buildDebrief(state)
+    expect(report.instructorFeedback).toContain('warm outlet')
+    expect(report.instructorFeedback).toContain('weak airflow')
+    expect(report.instructorFeedback).not.toContain('high gauge')
+    expect(report.confirmedLabel).toBe('Restricted filter')
   })
 })

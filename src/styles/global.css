@@ -226,6 +226,16 @@ button { cursor: pointer; }
 
 .stage canvas { display: block; }
 
+.stage-fallback {
+  height: 100%;
+  min-height: 16rem;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  color: var(--muted);
+  text-align: center;
+}
+
 .stage-caption {
   position: absolute;
   left: 1rem;
